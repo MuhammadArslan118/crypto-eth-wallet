@@ -1,0 +1,130 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>My Wallet Test Dapp</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 40px auto;
+        padding: 0 16px;
+      }
+      button {
+        margin: 4px 4px 4px 0;
+        padding: 8px 14px;
+        cursor: pointer;
+      }
+      pre {
+        background: #f3f3f3;
+        padding: 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>My Wallet test dapp</h1>
+    <p>Wallets found via EIP-6963: <span id="wallets">none yet</span></p>
+    <div>
+      <button id="connect">Connect</button>
+      <button id="chain">eth_chainId</button>
+      <button id="balance">Get balance</button>
+      <button id="sign">personal_sign</button>
+      <button id="typed">signTypedData_v4</button>
+      <button id="sendtx">Send 0 ETH to self</button>
+      <button id="switch">Switch to Mainnet</button>
+      <button id="switchBack">Switch to Sepolia</button>
+    </div>
+    <pre id="log"></pre>
+
+    <script>
+      const log = (...a) => {
+        document.getElementById("log").textContent =
+          a
+            .map((x) =>
+              typeof x === "string" ? x : JSON.stringify(x, null, 2),
+            )
+            .join(" ") +
+          "\n" +
+          document.getElementById("log").textContent;
+      };
+      let provider = null;
+      let account = null;
+
+      window.addEventListener("eip6963:announceProvider", (e) => {
+        const { info, provider: p } = e.detail;
+        document.getElementById("wallets").textContent =
+          info.name + " (" + info.rdns + ")";
+        if (info.rdns === "com.example.mywallet") {
+          provider = p;
+          p.on("accountsChanged", (a) => {
+            account = a[0];
+            log("accountsChanged", a);
+          });
+          p.on("chainChanged", (c) => log("chainChanged", c));
+        }
+      });
+      window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+      const call = (method, params) => {
+        if (!provider)
+          return log(
+            "My Wallet not detected — is the extension loaded? Reload this page after reloading the extension.",
+          );
+        return provider.request({ method, params }).then(
+          (r) => {
+            log(method, r);
+            return r;
+          },
+          (e) => log(method + " error", { code: e.code, message: e.message }),
+        );
+      };
+
+      document.getElementById("connect").onclick = async () => {
+        const a = await call("eth_requestAccounts");
+        if (a) account = a[0];
+      };
+      document.getElementById("chain").onclick = () => call("eth_chainId");
+      document.getElementById("balance").onclick = () =>
+        call("eth_getBalance", [account, "latest"]);
+      document.getElementById("sign").onclick = () =>
+        call("personal_sign", [
+          "0x" +
+            Array.from(new TextEncoder().encode("Hello from the test dapp"))
+              .map((b) => b.toString(16).padStart(2, "0"))
+              .join(""),
+          account,
+        ]);
+      document.getElementById("typed").onclick = async () => {
+        const chainId = parseInt(
+          await provider.request({ method: "eth_chainId" }),
+          16,
+        );
+        call("eth_signTypedData_v4", [
+          account,
+          JSON.stringify({
+            types: {
+              EIP712Domain: [
+                { name: "name", type: "string" },
+                { name: "chainId", type: "uint256" },
+              ],
+              Mail: [{ name: "contents", type: "string" }],
+            },
+            primaryType: "Mail",
+            domain: { name: "Test Dapp", chainId },
+            message: { contents: "Hello typed data" },
+          }),
+        ]);
+      };
+      document.getElementById("sendtx").onclick = () =>
+        call("eth_sendTransaction", [
+          { from: account, to: account, value: "100000000" },
+        ]);
+      document.getElementById("switch").onclick = () =>
+        call("wallet_switchEthereumChain", [{ chainId: "0x1" }]);
+      document.getElementById("switchBack").onclick = () =>
+        call("wallet_switchEthereumChain", [{ chainId: "0xaa36a7" }]);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+export const DEFAULT_ROUTE = '/';
+export const UNLOCK_ROUTE = '/unlock';
+export const LOCK_ROUTE = '/lock';
+export const ONBOARDING_ROUTE = '/onboarding';
+export const CREATE_PASSWORD_ROUTE = '/create-password';
+export const SEED_PHRASE_ROUTE = '/seed-phrase';
+export const CONFIRM_SEED_PHRASE_ROUTE = '/confirm-seed-phrase';
+export const HOME_ROUTE = '/home';
+export const SEND_ROUTE = '/send';
+export const ASSET_ROUTE = '/asset';
+export const SETTINGS_ROUTE = '/settings';
+export const CONNECT_ROUTE = '/connect';
+export const CONNECTED_ROUTE = '/connected';
