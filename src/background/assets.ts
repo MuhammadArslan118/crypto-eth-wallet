@@ -250,21 +250,44 @@ export async function addActivity(ctx: AssetContext, item: ActivityItem) {
   await setList("activity", accountScope(ctx), [item, ...items].slice(0, 100));
 }
 
+export async function clearActivity(ctx: AssetContext) {
+  await setList("activity", accountScope(ctx), []);
+}
+
 export async function getActivity(ctx: AssetContext): Promise<ActivityItem[]> {
   const items = await getList<ActivityItem>("activity", accountScope(ctx));
+  const pending = items.filter((i) => i.status === "pending");
+  if (pending.length === 0) return items;
+
+  // Nonces below this are used up: a pending tx with one of them will never confirm
+  const nextNonce = await ctx.rpc.run((p) => p.getTransactionCount(ctx.owner, "latest")).catch(() => null);
   let changed = false;
   await Promise.all(
-    items
-      .filter((i) => i.status === "pending")
-      .map(async (item) => {
-        const receipt = await ctx.rpc.getTransactionReceipt(item.hash).catch(() => null);
-        if (receipt) {
-          item.status = receipt.status === 1 ? "confirmed" : "failed";
-          changed = true;
-          if (item.status === "confirmed" && item.nft) await afterNftSent(ctx, item.nft);
-        }
-      })
+    pending.map(async (item) => {
+      const receipt = await ctx.rpc.getTransactionReceipt(item.hash).catch(() => null);
+      if (receipt) {
+        item.status = receipt.status === 1 ? "confirmed" : "failed";
+        changed = true;
+        if (item.status === "confirmed" && item.nft) await afterNftSent(ctx, item.nft);
+      } else if (item.nonce !== undefined && nextNonce !== null && item.nonce < nextNonce) {
+        item.status = "dropped";
+        changed = true;
+      }
+    })
   );
+
+  // Once a speed-up / cancel is mined, the tx it replaced is marked as such
+  for (const item of items) {
+    if (!item.replaces || (item.status !== "confirmed" && item.status !== "failed")) continue;
+    const original = items.find((i) => i.hash === item.replaces);
+    if (original && original.status !== "confirmed" && original.status !== "failed") {
+      const status = item.kind === "cancel" ? "cancelled" : "replaced";
+      if (original.status !== status) {
+        original.status = status;
+        changed = true;
+      }
+    }
+  }
   if (changed) await setList("activity", accountScope(ctx), items);
   return items;
 }

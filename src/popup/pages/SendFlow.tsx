@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ethers } from 'ethers';
 import { send } from '../api';
-import { AddressInfo, FeeEstimate, NftInfo, SendAsset, SendRequest, TokenInfo, WalletState } from '../../shared/types';
+import { AddressInfo, FeeEstimate, GasSpeed, NftInfo, SendAsset, SendRequest, TokenInfo, WalletState } from '../../shared/types';
 import { Alert } from '../components/Alert';
 import { GasSummary } from '../components/GasSummary';
 import { formatAmount } from '../components/AccountOverview';
@@ -74,6 +74,7 @@ export function SendFlow({ state, nativeBalance, initialAsset, onDone, onViewAct
   const [amount, setAmount] = useState('');
   const [isMax, setIsMax] = useState(false);
 
+  const [speed, setSpeed] = useState<GasSpeed>('market');
   const [fee, setFee] = useState<FeeEstimate | null>(null);
   const [feeError, setFeeError] = useState('');
   const [submitError, setSubmitError] = useState('');
@@ -143,7 +144,7 @@ export function SendFlow({ state, nativeBalance, initialAsset, onDone, onViewAct
   }
   const amountReady = isErc721 || (amount !== '' && !amountError);
 
-  const request: SendRequest = { to: trimmedTo, asset: selected.asset, amount: quantity, max: isMax && isNative };
+  const request: SendRequest = { to: trimmedTo, asset: selected.asset, amount: quantity, max: isMax && isNative, speed };
 
   const chooseAsset = (key: string) => {
     setAssetKeySelected(key);
@@ -154,7 +155,7 @@ export function SendFlow({ state, nativeBalance, initialAsset, onDone, onViewAct
 
   const handleMax = async () => {
     try {
-      setAmount(await send<string>('GET_MAX_AMOUNT', { asset: selected.asset, to: trimmedTo }));
+      setAmount(await send<string>('GET_MAX_AMOUNT', { asset: selected.asset, to: trimmedTo, speed }));
       setIsMax(true);
     } catch (e: any) {
       setSubmitError(e.message);
@@ -170,7 +171,7 @@ export function SendFlow({ state, nativeBalance, initialAsset, onDone, onViewAct
     send<FeeEstimate>('ESTIMATE_SEND', { request })
       .then(setFee)
       .catch((e) => setFeeError(e.message));
-  }, [step]);
+  }, [step, speed]);
 
   const confirm = async () => {
     setSubmitError('');
@@ -349,7 +350,7 @@ export function SendFlow({ state, nativeBalance, initialAsset, onDone, onViewAct
             )}
           </div>
 
-          <GasSummary fee={fee} nativeAmount={isNative && !isMax ? amount : undefined} />
+          <GasSummary fee={fee} nativeAmount={isNative && !isMax ? amount : undefined} speed={speed} onSpeedChange={setSpeed} />
           {fee?.balanceError && <Alert severity="danger" title="Insufficient funds">{fee.balanceError}</Alert>}
           {feeError && (
             <Alert severity="danger" title="Unable to send">{feeError}</Alert>

@@ -34,7 +34,10 @@ export interface NewNetwork {
   explorer?: string;
 }
 
+export type GasSpeed = 'low' | 'market' | 'aggressive';
+
 export interface FeeEstimate {
+  speed: GasSpeed;
   gasLimit: string;
   gasPriceGwei: string;
   estimatedFee: string;
@@ -86,6 +89,7 @@ export interface SendRequest {
   amount: string;
   // Native only: send the whole balance minus gas
   max?: boolean;
+  speed?: GasSpeed;
 }
 
 export interface AddressInfo {
@@ -102,10 +106,35 @@ export interface ActivityItem {
   symbol: string;
   origin: string;
   time: number;
-  status: 'pending' | 'confirmed' | 'failed';
+  // replaced = sped up (the faster copy is shown instead), dropped = another tx used its nonce
+  status: 'pending' | 'confirmed' | 'failed' | 'cancelled' | 'replaced' | 'dropped';
   // Set for NFT sends so the NFT can be dropped from the list once confirmed
   nft?: { contract: string; tokenId: string; standard: 'ERC721' | 'ERC1155' };
+  // Needed to speed up or cancel the tx while it is pending
+  nonce?: number;
+  tx?: StoredTx;
+  kind?: 'speedup' | 'cancel';
+  // Hash of the pending tx this one replaces
+  replaces?: string;
 }
+
+// Transaction fields as decimal strings (bigints don't survive chrome.storage)
+export interface StoredTx {
+  to: string | null;
+  value: string;
+  data: string;
+  gasLimit: string;
+  maxFeePerGas?: string;
+  maxPriorityFeePerGas?: string;
+  gasPrice?: string;
+}
+
+export interface Settings {
+  // 0 = never
+  autoLockMinutes: number;
+}
+
+export const DEFAULT_SETTINGS: Settings = { autoLockMinutes: 15 };
 
 export type ApprovalType =
   | "unlock"

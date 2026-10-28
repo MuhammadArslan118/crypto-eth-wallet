@@ -1,6 +1,6 @@
 ﻿import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Header } from './components/Header';
+import { Header, MenuItem } from './components/Header';
 import { AccountOverview } from './components/AccountOverview';
 import { ActionButtons } from './components/ActionButtons';
 import { Home, Tab } from './pages/Home';
@@ -14,14 +14,34 @@ import { Approval } from './pages/Approval';
 import { Accounts } from './pages/Accounts';
 import { ImportAsset } from './pages/ImportAsset';
 import { Networks } from './pages/Networks';
-import { send } from './api';
+import { Settings, SettingsSection } from './pages/Settings';
+import { AccountDetails } from './pages/AccountDetails';
+import { isExpanded, openExpanded, send } from './api';
 import { NftInfo, SendAsset, WalletState } from '../shared/types';
 import { colors, errorText } from './styles';
 
 // Approval windows are opened by the background as popup.html#approval=<id>
 const approvalId = new URLSearchParams(location.hash.slice(1)).get('approval');
 
-type View = 'home' | 'send' | 'receive' | 'accounts' | 'networks' | 'importToken' | 'importNft' | 'nft';
+if (isExpanded) document.body.classList.add('expanded');
+
+type View = 'home' | 'send' | 'receive' | 'accounts' | 'accountDetails' | 'networks' | 'settings' | 'importToken' | 'importNft' | 'nft';
+
+// Origin of the website in the active tab, if the popup was opened over one
+function useCurrentOrigin() {
+  const [origin, setOrigin] = useState<string | undefined>();
+  useEffect(() => {
+    // In the expanded view the active tab is the wallet itself
+    if (isExpanded || approvalId) return;
+    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      try {
+        const url = new URL(tab?.url ?? '');
+        if (url.protocol === 'https:' || url.protocol === 'http:') setOrigin(url.origin);
+      } catch {}
+    }).catch(() => {});
+  }, []);
+  return origin;
+}
 
 function Wallet({ state, refresh }: { state: WalletState; refresh: () => void }) {
   const [view, setView] = useState<View>('home');
@@ -30,6 +50,14 @@ function Wallet({ state, refresh }: { state: WalletState; refresh: () => void })
   const [nft, setNft] = useState<NftInfo | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
   const [balanceError, setBalanceError] = useState('');
+  const [detailsAddress, setDetailsAddress] = useState<string | null>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('main');
+  const currentOrigin = useCurrentOrigin();
+  const [connectedSites, setConnectedSites] = useState<string[]>([]);
+
+  useEffect(() => {
+    send<string[]>('GET_CONNECTED_SITES').then(setConnectedSites).catch(() => {});
+  }, [view]);
 
   useEffect(() => {
     setBalance(null);
@@ -48,6 +76,26 @@ function Wallet({ state, refresh }: { state: WalletState; refresh: () => void })
     setSendAsset(asset);
     setView('send');
   };
+  const openSettings = (section: SettingsSection = 'main') => {
+    setSettingsSection(section);
+    setView('settings');
+  };
+  const openDetails = (a: string) => {
+    setDetailsAddress(a);
+    setView('accountDetails');
+  };
+  const lock = () => send('LOCK').then(refresh);
+
+  const menu: MenuItem[] = [
+    { icon: '👤', label: 'Account details', onClick: () => openDetails(address) },
+    ...(state.network.explorer
+      ? [{ icon: '↗', label: 'View on explorer', onClick: () => window.open(`${state.network.explorer}/address/${address}`, '_blank') }]
+      : []),
+    ...(isExpanded ? [] : [{ icon: '⛶', label: 'Expand view', onClick: openExpanded }]),
+    { icon: '🔗', label: 'Connected sites', onClick: () => openSettings('connections') },
+    { icon: '⚙️', label: 'Settings', onClick: () => openSettings() },
+    { icon: '🔒', label: 'Lock wallet', onClick: lock, danger: true },
+  ];
 
   return (
     <>
@@ -56,7 +104,9 @@ function Wallet({ state, refresh }: { state: WalletState; refresh: () => void })
         networks={state.networks}
         onSwitchNetwork={(key) => send('SWITCH_NETWORK', { network: key }).then(refresh)}
         onManageNetworks={() => setView('networks')}
-        onLock={() => send('LOCK').then(refresh)}
+        siteConnected={currentOrigin ? connectedSites.includes(currentOrigin) : undefined}
+        onOpenConnections={() => openSettings('connections')}
+        menu={menu}
       />
       {view === 'home' && (
         <>
@@ -99,13 +149,39 @@ function Wallet({ state, refresh }: { state: WalletState; refresh: () => void })
         />
       )}
       {view === 'networks' && <Networks state={state} onChange={refresh} onDone={home} />}
-      {view === 'receive' && <Receive address={address} onDone={home} />}
-      {view === 'accounts' && <Accounts state={state} onChange={refresh} onDone={home} />}
+      {view === 'receive' && <Receive address={address} accountName={account?.name} network={state.network} onDone={home} />}
+      {view === 'accounts' && <Accounts state={state} onChange={refresh} onDone={home} onOpenDetails={openDetails} />}
+      {view === 'accountDetails' && detailsAddress && (
+        <AccountDetails state={state} address={detailsAddress} onChange={refresh} onDone={home} />
+      )}
+      {view === 'settings' && (
+        <Settings
+          state={state}
+          initialSection={settingsSection}
+          currentOrigin={currentOrigin}
+          onOpenNetworks={() => setView('networks')}
+          onLock={lock}
+          onDone={home}
+        />
+      )}
       {view === 'importToken' && <ImportAsset kind="token" networkName={state.network.name} onDone={home} />}
       {view === 'importNft' && <ImportAsset kind="nft" networkName={state.network.name} onDone={home} />}
     </>
   );
 }
+
+// Expanded view: the same screens in a centred column, like MetaMask's full-screen mode
+const expandedFrame: React.CSSProperties = {
+  width: '100%',
+  maxWidth: 640,
+  minHeight: '100vh',
+  margin: '0 auto',
+  background: colors.bg,
+  display: 'flex',
+  flexDirection: 'column',
+  borderLeft: `1px solid ${colors.border}`,
+  borderRight: `1px solid ${colors.border}`,
+};
 
 function App() {
   const [state, setState] = useState<WalletState | null>(null);
@@ -122,6 +198,15 @@ function App() {
   }, []);
 
   useEffect(refresh, [refresh]);
+
+  // The wallet can lock while this page is open (auto-lock timer, or Lock in another wallet window)
+  useEffect(() => {
+    const onChange = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+      if (area === 'session' && changes.secrets && changes.secrets.newValue === undefined) refresh();
+    };
+    chrome.storage.onChanged.addListener(onChange);
+    return () => chrome.storage.onChanged.removeListener(onChange);
+  }, [refresh]);
 
   // Approval windows can stay open a while; pinging keeps the MV3 service worker (and the pending request) alive
   useEffect(() => {
@@ -146,7 +231,7 @@ function App() {
   else content = <Wallet state={state} refresh={refresh} />;
 
   return (
-    <div style={{ width: 360, minHeight: 600, background: colors.bg, display: 'flex', flexDirection: 'column' }}>
+    <div style={isExpanded ? expandedFrame : { width: 360, minHeight: 600, background: colors.bg, display: 'flex', flexDirection: 'column' }}>
       {content}
     </div>
   );

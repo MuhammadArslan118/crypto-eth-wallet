@@ -7,9 +7,10 @@ interface AccountsProps {
   state: WalletState;
   onChange: () => void;
   onDone: () => void;
+  onOpenDetails: (address: string) => void;
 }
 
-export function Accounts({ state, onChange, onDone }: AccountsProps) {
+export function Accounts({ state, onChange, onDone, onOpenDetails }: AccountsProps) {
   const [mode, setMode] = useState<'list' | 'import'>('list');
   const [privateKey, setPrivateKey] = useState('');
   const [password, setPassword] = useState('');
@@ -87,7 +88,17 @@ export function Accounts({ state, onChange, onDone }: AccountsProps) {
               </div>
               <div style={{ fontSize: '12px', color: colors.muted }}>{shortAddress(a.address)}</div>
             </span>
-            {selected && <span style={{ color: colors.primary }}>✓</span>}
+            <span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              {selected && <span style={{ color: colors.primary }}>✓</span>}
+              <span
+                role="button"
+                title="Account details"
+                onClick={(e) => { e.stopPropagation(); onOpenDetails(a.address); }}
+                style={{ color: colors.muted, padding: '0 4px', fontSize: '18px', lineHeight: 1 }}
+              >
+                ⋯
+              </span>
+            </span>
           </button>
         );
       })}

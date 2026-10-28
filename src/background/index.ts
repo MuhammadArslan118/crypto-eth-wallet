@@ -1,4 +1,4 @@
-﻿import { walletController } from "./wallet-controller";
+﻿import { AUTO_LOCK_ALARM, walletController } from "./wallet-controller";
 import { friendlyMessage, toRpcError } from "./errors";
 import * as assets from "./assets";
 
@@ -76,9 +76,15 @@ async function handlePopupMessage(msg: any) {
     case "ESTIMATE_SEND":
       return walletController.estimateSend(msg.request);
     case "ESTIMATE_APPROVAL_TX":
-      return walletController.estimateApprovalTx(msg.id);
+      return walletController.estimateApprovalTx(msg.id, msg.speed);
     case "GET_MAX_AMOUNT":
-      return walletController.getMaxAmount(msg.asset, msg.to);
+      return walletController.getMaxAmount(msg.asset, msg.to, msg.speed);
+    case "ESTIMATE_REPLACEMENT":
+      return walletController.estimateReplacement(msg.hash, msg.kind);
+    case "REPLACE_TX":
+      return walletController.replaceTransaction(msg.hash, msg.kind);
+    case "CLEAR_ACTIVITY":
+      return walletController.clearActivity();
     case "GET_ADDRESS_INFO":
       return walletController.getAddressInfo(msg.address);
     case "ADD_ACCOUNT":
@@ -87,6 +93,20 @@ async function handlePopupMessage(msg: any) {
       return walletController.importAccount(msg.privateKey, msg.password);
     case "SELECT_ACCOUNT":
       return walletController.selectAccount(msg.address);
+    case "RENAME_ACCOUNT":
+      return walletController.renameAccount(msg.address, msg.name);
+    case "REMOVE_ACCOUNT":
+      return walletController.removeAccount(msg.address, msg.password);
+    case "EXPORT_PRIVATE_KEY":
+      return walletController.exportPrivateKey(msg.address, msg.password);
+    case "REVEAL_SRP":
+      return walletController.revealSecretPhrase(msg.password);
+    case "CHANGE_PASSWORD":
+      return walletController.changePassword(msg.currentPassword, msg.newPassword);
+    case "GET_SETTINGS":
+      return walletController.getSettings();
+    case "UPDATE_SETTINGS":
+      return walletController.updateSettings(msg.settings);
     case "GET_TOKENS":
       return assets.getTokens(walletController.assetContext());
     case "IMPORT_TOKEN":
@@ -104,7 +124,7 @@ async function handlePopupMessage(msg: any) {
     case "GET_APPROVAL":
       return walletController.getApproval(msg.id);
     case "RESOLVE_APPROVAL":
-      return walletController.resolveApproval(msg.id, !!msg.approved);
+      return walletController.resolveApproval(msg.id, !!msg.approved, msg.speed);
     case "GET_CONNECTED_SITES":
       return walletController.getConnectedOrigins();
     case "DISCONNECT_SITE":
@@ -120,8 +140,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(""))) return;
   handlePopupMessage(msg)
     .then((data) => sendResponse({ data: data ?? null }))
-    .catch((e) => sendResponse({ error: friendlyMessage(e) }));
+    .catch((e) => sendResponse({ error: friendlyMessage(e) }))
+    // Any wallet UI activity restarts the auto-lock timer
+    .finally(() => walletController.scheduleAutoLock());
   return true;
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== AUTO_LOCK_ALARM) return;
+  await walletController.ensureLoaded();
+  await walletController.lock();
+});
+
+// Like MetaMask, onboarding opens in a full tab on first install
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason === chrome.runtime.OnInstalledReason.INSTALL) {
+    chrome.tabs.create({ url: chrome.runtime.getURL("popup.html#expanded") });
+  }
 });
 
 console.log("MyWallet background started with wallet controller");

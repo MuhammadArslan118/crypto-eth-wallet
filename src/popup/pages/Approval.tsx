@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ethers } from 'ethers';
 import { send } from '../api';
-import { ApprovalRequest, FeeEstimate, WalletState } from '../../shared/types';
+import { ApprovalRequest, FeeEstimate, GasSpeed, WalletState } from '../../shared/types';
 import { GasSummary } from '../components/GasSummary';
 import { Alert } from '../components/Alert';
 import { colors, primaryButton, secondaryButton, shortAddress } from '../styles';
@@ -51,6 +51,7 @@ export function Approval({ id, state }: { id: string; state: WalletState }) {
   const [req, setReq] = useState<ApprovalRequest | null | undefined>(undefined);
   const [fee, setFee] = useState<FeeEstimate | null>(null);
   const [feeError, setFeeError] = useState('');
+  const [speed, setSpeed] = useState<GasSpeed>('market');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -59,12 +60,15 @@ export function Approval({ id, state }: { id: string; state: WalletState }) {
 
   useEffect(() => {
     if (req?.type !== 'eth_sendTransaction') return;
-    send<FeeEstimate>('ESTIMATE_APPROVAL_TX', { id }).then(setFee).catch((e) => setFeeError(e.message));
-  }, [req]);
+    setFee(null);
+    setFeeError('');
+    send<FeeEstimate>('ESTIMATE_APPROVAL_TX', { id, speed }).then(setFee).catch((e) => setFeeError(e.message));
+  }, [req, speed]);
 
   const resolve = async (approved: boolean) => {
     setBusy(true);
-    await send('RESOLVE_APPROVAL', { id, approved }).catch(() => {});
+    const extra = req?.type === 'eth_sendTransaction' ? { speed } : {};
+    await send('RESOLVE_APPROVAL', { id, approved, ...extra }).catch(() => {});
     window.close();
   };
 
@@ -155,7 +159,7 @@ export function Approval({ id, state }: { id: string; state: WalletState }) {
           {call?.name === 'setApprovalForAll' && call.args[1] && (
             <Alert severity="danger" title="Access to all your NFTs">The operator will be able to transfer every NFT you own from this collection.</Alert>
           )}
-          <GasSummary fee={fee} nativeAmount={value > 0n ? ethers.formatEther(value) : undefined} />
+          <GasSummary fee={fee} nativeAmount={value > 0n ? ethers.formatEther(value) : undefined} speed={speed} onSpeedChange={setSpeed} />
           {fee?.balanceError && <Alert severity="danger" title="Insufficient funds">{fee.balanceError}</Alert>}
           {feeError && <Alert severity="danger" title="This transaction is likely to fail">{feeError}</Alert>}
         </>

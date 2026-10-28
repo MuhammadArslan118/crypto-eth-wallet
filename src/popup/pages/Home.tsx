@@ -3,6 +3,7 @@ import { send } from '../api';
 import { ActivityItem, NftInfo, SendAsset, TokenInfo, WalletState } from '../../shared/types';
 import { formatAmount } from '../components/AccountOverview';
 import { Alert } from '../components/Alert';
+import { ActivityList } from '../components/ActivityList';
 import { colors, linkButton, shortAddress } from '../styles';
 
 export type Tab = 'tokens' | 'nfts' | 'activity';
@@ -36,8 +37,6 @@ const row: React.CSSProperties = {
 };
 
 const empty: React.CSSProperties = { textAlign: 'center', color: colors.muted, padding: '24px 20px', fontSize: '14px' };
-
-const statusColor = { pending: colors.warning, confirmed: '#28a745', failed: colors.danger };
 
 function TokenIcon({ symbol }: { symbol: string }) {
   return (
@@ -134,7 +133,7 @@ export function Home({ state, nativeBalance, tab, onTabChange, onSendAsset, onOp
         {tab === 'nfts' && (
           <>
             {nfts?.length === 0 && <div style={empty}>🖼️<br />No NFTs yet</div>}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', paddingTop: '12px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '10px', paddingTop: '12px' }}>
               {nfts?.map((n) => (
                 <button
                   key={`${n.contract}:${n.tokenId}`}
@@ -157,26 +156,8 @@ export function Home({ state, nativeBalance, tab, onTabChange, onSendAsset, onOp
           </>
         )}
 
-        {tab === 'activity' && (
-          <>
-            {activity?.length === 0 && <div style={empty}>📊<br />No activity yet</div>}
-            {activity?.map((a) => (
-              <a key={a.hash} href={state.network.explorer ? `${state.network.explorer}/tx/${a.hash}` : undefined} target="_blank" rel="noreferrer" style={row}>
-                <span style={{ minWidth: 0 }}>
-                  <div>{a.nft ? 'Send NFT' : a.origin === 'wallet' ? `Send ${a.symbol}` : 'Contract interaction'}</div>
-                  <div style={{ fontSize: '12px', color: statusColor[a.status], textTransform: 'capitalize' }}>
-                    {a.status} · <span style={{ color: colors.muted }}>{new Date(a.time).toLocaleString()}</span>
-                  </div>
-                  <div style={{ fontSize: '11px', color: colors.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {a.to ? `to ${shortAddress(a.to)}` : 'contract deploy'}{a.origin !== 'wallet' ? ` · ${a.origin}` : ''}
-                  </div>
-                </span>
-                <span style={{ whiteSpace: 'nowrap', fontSize: '13px' }}>
-                  {a.nft ? `${a.symbol}${a.amount !== '1' ? ` ×${a.amount}` : ''}` : `-${formatAmount(a.amount)} ${a.symbol}`}
-                </span>
-              </a>
-            ))}
-          </>
+        {tab === 'activity' && activity && (
+          <ActivityList items={activity} network={state.network} onChanged={() => setReload((n) => n + 1)} />
         )}
       </div>
     </div>

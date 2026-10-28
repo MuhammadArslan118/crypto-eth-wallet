@@ -14,3 +14,11 @@ export async function send<T = any>(type: string, payload: Record<string, unknow
   }
   return res.data as T;
 }
+
+// The popup page also runs full-size in a browser tab ("Expand view"), opened as popup.html#expanded
+export const isExpanded = new URLSearchParams(location.hash.slice(1)).has('expanded');
+
+export function openExpanded() {
+  chrome.tabs.create({ url: chrome.runtime.getURL('popup.html#expanded') });
+  window.close();
+}

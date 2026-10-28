@@ -1,8 +1,15 @@
-﻿import { ApprovalRequest, ApprovalType } from "../../shared/types";
+﻿import { ApprovalRequest, ApprovalType, GasSpeed } from "../../shared/types";
+
+// What the user chose on the approval screen
+export interface ApprovalResult {
+  approved: boolean;
+  // eth_sendTransaction only: the fee speed picked on the screen
+  speed?: GasSpeed;
+}
 
 interface PendingRequest extends ApprovalRequest {
   windowId?: number;
-  resolve: (approved: boolean) => void;
+  resolve: (result: ApprovalResult) => void;
 }
 
 // Each request opens its own popup window (popup.html#approval=<id>).
@@ -13,12 +20,12 @@ export class ApprovalManager {
   constructor() {
     chrome.windows.onRemoved.addListener((windowId) => {
       for (const req of this.pending.values()) {
-        if (req.windowId === windowId) this.resolve(req.id, false);
+        if (req.windowId === windowId) this.resolve(req.id, { approved: false });
       }
     });
   }
 
-  request(type: ApprovalType, origin: string, params: any[] = []): Promise<boolean> {
+  request(type: ApprovalType, origin: string, params: any[] = []): Promise<ApprovalResult> {
     const id = crypto.randomUUID();
     return new Promise((resolve) => {
       const req: PendingRequest = { id, type, origin, params, resolve };
@@ -34,7 +41,7 @@ export class ApprovalManager {
         .then((win) => {
           req.windowId = win?.id;
         })
-        .catch(() => this.resolve(id, false));
+        .catch(() => this.resolve(id, { approved: false }));
     });
   }
 
@@ -45,11 +52,11 @@ export class ApprovalManager {
     return data;
   }
 
-  resolve(id: string, approved: boolean) {
+  resolve(id: string, result: ApprovalResult) {
     const req = this.pending.get(id);
     if (req) {
       this.pending.delete(id);
-      req.resolve(approved);
+      req.resolve(result);
     }
   }
 }

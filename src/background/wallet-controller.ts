@@ -4,14 +4,18 @@ import { RpcProvider } from "./rpc/provider";
 import { ApprovalManager } from "./approvals/approval-manager";
 import { ERR, RpcError, friendlyMessage } from "./errors";
 import * as assets from "./assets";
+import * as gas from "./gas";
 import { DEFAULT_NETWORK, NETWORKS, NetworkConfig } from "../shared/constants/networks";
 import { READ_METHODS } from "../shared/constants/methods";
 import {
-  AccountInfo, ActivityItem, AddressInfo, ApprovalType, FeeEstimate, NetworkInfo, NewNetwork, SendAsset, SendRequest, WalletState,
+  AccountInfo, ActivityItem, AddressInfo, ApprovalType, DEFAULT_SETTINGS, FeeEstimate, GasSpeed, NetworkInfo, NewNetwork, SendAsset,
+  SendRequest, Settings, StoredTx, WalletState,
 } from "../shared/types";
 import { ethers } from "ethers";
 
 const READ_METHOD_SET = new Set(READ_METHODS);
+
+export const AUTO_LOCK_ALARM = "autoLock";
 
 type WalletEvent = "accountsChanged" | "chainChanged";
 type EventListener = (event: WalletEvent, data?: unknown) => void;
@@ -32,6 +36,15 @@ function parseSecrets(plain: string): Secrets {
     if (typeof data?.mnemonic === "string") return { mnemonic: data.mnemonic, importedKeys: data.importedKeys ?? [] };
   } catch {}
   return { mnemonic: plain, importedKeys: [] };
+}
+
+const optionalBigInt = (v?: string) => (v === undefined ? undefined : BigInt(v));
+
+function storeTx(r: ethers.TransactionResponse): StoredTx {
+  const fees = r.maxFeePerGas != null
+    ? { maxFeePerGas: r.maxFeePerGas.toString(), maxPriorityFeePerGas: (r.maxPriorityFeePerGas ?? 0n).toString() }
+    : { gasPrice: (r.gasPrice ?? 0n).toString() };
+  return { to: r.to, value: r.value.toString(), data: r.data, gasLimit: r.gasLimit.toString(), ...fees };
 }
 
 function parseChainId(value: string | number): number {
@@ -55,6 +68,8 @@ export class WalletController {
   private listeners = new Set<EventListener>();
   private loaded: Promise<void> | null = null;
   private hasVaultCached = false;
+  private accountNames: Record<string, string> = {};
+  private settings: Settings = { ...DEFAULT_SETTINGS };
 
   ensureLoaded() {
     return (this.loaded ??= this.load());
@@ -62,8 +77,10 @@ export class WalletController {
 
   private async load() {
     const local = await chrome.storage.local.get([
-      "connectedOrigins", "network", "customNetworks", "hdAccountCount", "selectedAddress",
+      "connectedOrigins", "network", "customNetworks", "hdAccountCount", "selectedAddress", "accountNames", "settings",
     ]);
+    this.accountNames = local.accountNames ?? {};
+    this.settings = { ...DEFAULT_SETTINGS, ...local.settings };
     this.connectedOrigins = new Set(local.connectedOrigins ?? []);
     this.hdAccountCount = local.hdAccountCount ?? 1;
     this.selected = local.selectedAddress ?? null;
@@ -119,7 +136,8 @@ export class WalletController {
     this.connectedOrigins.clear();
     this.hdAccountCount = 1;
     this.selected = null;
-    await chrome.storage.local.set({ connectedOrigins: [], hdAccountCount: 1, selectedAddress: null });
+    this.accountNames = {};
+    await chrome.storage.local.set({ connectedOrigins: [], hdAccountCount: 1, selectedAddress: null, accountNames: {} });
     await this.persistSecrets({ mnemonic, importedKeys: [] }, password);
     this.hasVaultCached = true;
     this.emit("accountsChanged");
@@ -154,7 +172,53 @@ export class WalletController {
     this.secrets = null;
     this.accounts = [];
     await chrome.storage.session.remove(["secrets", "mnemonic"]);
+    await chrome.alarms.clear(AUTO_LOCK_ALARM);
     this.emit("accountsChanged");
+  }
+
+  // ---------- settings & security ----------
+
+  getSettings() {
+    return this.settings;
+  }
+
+  async updateSettings(patch: Partial<Settings>) {
+    const minutes = patch.autoLockMinutes;
+    if (minutes !== undefined && !(Number.isInteger(minutes) && minutes >= 0 && minutes <= 1440)) {
+      throw new Error("Auto-lock must be between 0 and 1440 minutes");
+    }
+    this.settings = { ...this.settings, ...patch };
+    await chrome.storage.local.set({ settings: this.settings });
+    this.scheduleAutoLock();
+    return this.settings;
+  }
+
+  // Called after every popup message, so the wallet locks after N minutes without wallet UI activity.
+  // An alarm survives the service worker being stopped, unlike setTimeout.
+  scheduleAutoLock() {
+    if (this.isUnlocked() && this.settings.autoLockMinutes > 0) {
+      chrome.alarms.create(AUTO_LOCK_ALARM, { delayInMinutes: this.settings.autoLockMinutes });
+    } else {
+      chrome.alarms.clear(AUTO_LOCK_ALARM);
+    }
+  }
+
+  async revealSecretPhrase(password: string) {
+    return (await this.decryptVault(password)).mnemonic;
+  }
+
+  async exportPrivateKey(address: string, password: string) {
+    await this.decryptVault(password);
+    const account = this.accounts.find((a) => a.address === address);
+    if (!account) throw new Error("Unknown account");
+    return account.privateKey;
+  }
+
+  async changePassword(current: string, next: string) {
+    const secrets = await this.decryptVault(current);
+    if (!next || next.length < 8) throw new Error("New password must be at least 8 characters");
+    if (next === current) throw new Error("New password must be different from the current one");
+    await this.persistSecrets(secrets, next);
   }
 
   private setSecrets(secrets: Secrets) {
@@ -162,15 +226,13 @@ export class WalletController {
     const hd = HDWallet.deriveAccounts(secrets.mnemonic, this.hdAccountCount).map((a, i) => ({
       address: a.address,
       privateKey: a.privateKey,
-      name: `Account ${i + 1}`,
+      name: this.accountNames[a.address] ?? `Account ${i + 1}`,
       type: "hd" as const,
     }));
-    const imported = secrets.importedKeys.map((key, i) => ({
-      address: new ethers.Wallet(key).address,
-      privateKey: key,
-      name: `Imported ${i + 1}`,
-      type: "imported" as const,
-    }));
+    const imported = secrets.importedKeys.map((key, i) => {
+      const address = new ethers.Wallet(key).address;
+      return { address, privateKey: key, name: this.accountNames[address] ?? `Imported ${i + 1}`, type: "imported" as const };
+    });
     this.accounts = [...hd, ...imported];
     if (!this.accounts.some((a) => a.address === this.selected)) this.selected = this.accounts[0]?.address ?? null;
   }
@@ -199,6 +261,33 @@ export class WalletController {
     secrets.importedKeys.push(key);
     await this.persistSecrets(secrets, password);
     await this.selectAccount(address);
+  }
+
+  async renameAccount(address: string, rawName: string) {
+    const name = rawName?.trim();
+    if (!name) throw new Error("Account name can't be empty");
+    if (name.length > 30) throw new Error("Account name must be 30 characters or less");
+    if (!this.accounts.some((a) => a.address === address)) throw new Error("Unknown account");
+    if (this.accounts.some((a) => a.address !== address && a.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error("An account with this name already exists");
+    }
+    this.accountNames[address] = name;
+    await chrome.storage.local.set({ accountNames: this.accountNames });
+    this.setSecrets(this.secrets!);
+  }
+
+  // Only imported accounts can be removed; HD accounts always come back from the recovery phrase
+  async removeAccount(address: string, password: string) {
+    const account = this.accounts.find((a) => a.address === address);
+    if (!account) throw new Error("Unknown account");
+    if (account.type !== "imported") throw new Error("Accounts created from your Secret Recovery Phrase can't be removed");
+    const secrets = await this.decryptVault(password);
+    secrets.importedKeys = secrets.importedKeys.filter((key) => new ethers.Wallet(key).address !== address);
+    delete this.accountNames[address];
+    await chrome.storage.local.set({ accountNames: this.accountNames });
+    await this.persistSecrets(secrets, password);
+    await chrome.storage.local.set({ selectedAddress: this.selected });
+    this.emit("accountsChanged");
   }
 
   async selectAccount(address: string) {
@@ -318,72 +407,77 @@ export class WalletController {
     return { tx: { to, value } as ethers.TransactionRequest, display: undefined };
   }
 
-  // Estimates gas and checks the account can pay value + gas, like MetaMask's "Insufficient funds for gas"
-  async estimateFee(tx: ethers.TransactionRequest): Promise<FeeEstimate> {
-    const from = this.requireSelected();
-    const symbol = this.network().symbol;
-    const [gasLimit, fee, balance] = await Promise.all([
-      tx.gasLimit ? Promise.resolve(BigInt(tx.gasLimit)) : this.rpc.run((p) => p.estimateGas({ ...tx, from })),
-      this.rpc.run((p) => p.getFeeData()),
-      this.rpc.run((p) => p.getBalance(from)),
-    ]);
-    const maxPerGas = fee.maxFeePerGas ?? fee.gasPrice ?? 0n;
-    const likelyPerGas = fee.gasPrice ?? maxPerGas;
-    const value = tx.value ? BigInt(tx.value) : 0n;
-    const needed = value + gasLimit * likelyPerGas;
+  private async marketFees() {
+    return gas.marketFromFeeData(await this.rpc.run((p) => p.getFeeData()));
+  }
 
+  private feeEstimate(speed: GasSpeed, gasLimit: bigint, fees: gas.SpeedFees, value: bigint, balance: bigint): FeeEstimate {
+    const symbol = this.network().symbol;
+    const needed = value + gasLimit * fees.likelyPerGas;
     let balanceError: string | undefined;
     if (needed > balance) {
       balanceError = value > 0n
         ? `Insufficient funds: you need ${ethers.formatEther(needed)} ${symbol} (amount + gas) but have ${ethers.formatEther(balance)}.`
         : `Insufficient ${symbol} for gas: you need ${ethers.formatEther(needed)} ${symbol} but have ${ethers.formatEther(balance)}.`;
     }
-
     return {
+      speed,
       gasLimit: gasLimit.toString(),
-      gasPriceGwei: ethers.formatUnits(likelyPerGas, "gwei"),
-      estimatedFee: ethers.formatEther(gasLimit * likelyPerGas),
-      maxFee: ethers.formatEther(gasLimit * maxPerGas),
+      gasPriceGwei: ethers.formatUnits(fees.likelyPerGas, "gwei"),
+      estimatedFee: ethers.formatEther(gasLimit * fees.likelyPerGas),
+      maxFee: ethers.formatEther(gasLimit * fees.maxPerGas),
       symbol,
       balanceError,
     };
   }
 
-  async estimateSend(req: SendRequest) {
-    if (req.max && req.asset.type === "native") {
-      const { value, gasLimit } = await this.maxNative(req.to);
-      if (value === 0n) throw new Error(`Insufficient ${this.network().symbol} to cover the gas fee`);
-      return this.estimateFee({ to: req.to, value, gasLimit });
-    }
-    const { tx } = await this.prepareSend(req);
-    return this.estimateFee(tx);
+  // Estimates gas at the chosen speed and checks the account can pay value + gas,
+  // like MetaMask's "Insufficient funds for gas". Also returns the fee fields to send with.
+  private async quoteFee(tx: ethers.TransactionRequest, speed: GasSpeed = "market") {
+    const from = this.requireSelected();
+    const [gasLimit, market, balance] = await Promise.all([
+      tx.gasLimit ? Promise.resolve(BigInt(tx.gasLimit)) : this.rpc.run((p) => p.estimateGas({ ...tx, from })),
+      this.marketFees(),
+      this.rpc.run((p) => p.getBalance(from)),
+    ]);
+    const fees = gas.feesForSpeed(market, speed);
+    const value = tx.value ? BigInt(tx.value) : 0n;
+    return { estimate: this.feeEstimate(speed, gasLimit, fees, value, balance), fields: fees.fields, gasLimit };
   }
 
-  async estimateApprovalTx(id: string) {
+  async estimateSend(req: SendRequest) {
+    if (req.max && req.asset.type === "native") {
+      const { value, gasLimit } = await this.maxNative(req.to, req.speed);
+      if (value === 0n) throw new Error(`Insufficient ${this.network().symbol} to cover the gas fee`);
+      return (await this.quoteFee({ to: req.to, value, gasLimit }, req.speed)).estimate;
+    }
+    const { tx } = await this.prepareSend(req);
+    return (await this.quoteFee(tx, req.speed)).estimate;
+  }
+
+  async estimateApprovalTx(id: string, speed?: GasSpeed) {
     const approval = this.approvals.get(id);
     const tx = approval?.params[0];
     if (!tx) throw new Error("Request not found");
-    return this.estimateFee({ to: tx.to, value: tx.value, data: tx.data ?? tx.input, gasLimit: tx.gas ?? tx.gasLimit });
+    const request = { to: tx.to, value: tx.value, data: tx.data ?? tx.input, gasLimit: tx.gas ?? tx.gasLimit };
+    return (await this.quoteFee(request, speed)).estimate;
   }
 
   // Native max = balance minus the worst-case gas fee, so the tx can't fail for lack of gas money
-  private async maxNative(to?: string) {
+  private async maxNative(to?: string, speed: GasSpeed = "market") {
     const from = this.requireSelected();
     const target = to && ethers.isAddress(to) ? to : from;
-    const [balance, gasLimit, fee] = await Promise.all([
+    const [balance, gasLimit, market] = await Promise.all([
       this.rpc.run((p) => p.getBalance(from)),
       this.rpc.run((p) => p.estimateGas({ from, to: target, value: 0n })),
-      this.rpc.run((p) => p.getFeeData()),
+      this.marketFees(),
     ]);
-    const feeFields: ethers.TransactionRequest =
-      fee.maxFeePerGas != null
-        ? { maxFeePerGas: fee.maxFeePerGas, maxPriorityFeePerGas: fee.maxPriorityFeePerGas ?? 0n }
-        : { gasPrice: fee.gasPrice ?? 0n };
-    const value = balance - gasLimit * (fee.maxFeePerGas ?? fee.gasPrice ?? 0n);
-    return { value: value > 0n ? value : 0n, gasLimit, feeFields };
+    const fees = gas.feesForSpeed(market, speed);
+    const value = balance - gasLimit * fees.maxPerGas;
+    return { value: value > 0n ? value : 0n, gasLimit, feeFields: fees.fields };
   }
 
-  async getMaxAmount(asset: SendAsset, to?: string) {
+  async getMaxAmount(asset: SendAsset, to?: string, speed?: GasSpeed) {
     if (asset.type === "token") {
       const token = (await assets.getTokens(this.assetContext())).find((t) => t.address === asset.address);
       return token?.balance ?? "0";
@@ -392,22 +486,70 @@ export class WalletController {
       const nft = (await assets.getNfts(this.assetContext())).find((n) => n.contract === asset.contract && n.tokenId === asset.tokenId);
       return nft?.balance ?? "1";
     }
-    return ethers.formatEther((await this.maxNative(to)).value);
+    return ethers.formatEther((await this.maxNative(to, speed)).value);
   }
 
   async sendFromPopup(req: SendRequest) {
     if (req.max && req.asset.type === "native") {
       if (!ethers.isAddress(req.to)) throw new Error("Invalid recipient address");
       // Recompute at send time and pin the gas fields so the whole balance minus fee goes out
-      const { value, gasLimit, feeFields } = await this.maxNative(req.to);
+      const { value, gasLimit, feeFields } = await this.maxNative(req.to, req.speed);
       if (value === 0n) throw new Error(`Insufficient ${this.network().symbol} to cover the gas fee`);
       return this.sendAndRecord({ to: req.to, value, gasLimit, ...feeFields }, "wallet");
     }
     const { tx, display, nft } = await this.prepareSend(req);
     // Fail early with a clear message instead of a raw node error
-    const fee = await this.estimateFee(tx);
-    if (fee.balanceError) throw new Error(fee.balanceError);
-    return this.sendAndRecord(tx, "wallet", display, nft);
+    const { estimate, fields, gasLimit } = await this.quoteFee(tx, req.speed);
+    if (estimate.balanceError) throw new Error(estimate.balanceError);
+    return this.sendAndRecord({ ...tx, gasLimit, ...fields }, "wallet", display, { nft });
+  }
+
+  // ---------- speed up / cancel ----------
+
+  // A pending tx is replaced by sending another one with the same nonce and higher fees.
+  // Cancel = a 0-value transfer to yourself, which uses up the nonce so the original can never confirm.
+  private async prepareReplacement(hash: string, kind: "speedup" | "cancel") {
+    const ctx = this.assetContext();
+    const item = (await assets.getActivity(ctx)).find((i) => i.hash === hash);
+    if (!item) throw new Error("Transaction not found");
+    if (item.status !== "pending") throw new Error("This transaction is no longer pending");
+    if (item.nonce === undefined || !item.tx) throw new Error("This transaction can't be sped up or cancelled");
+
+    const old = item.tx;
+    const [market, balance] = await Promise.all([this.marketFees(), this.rpc.run((p) => p.getBalance(ctx.owner))]);
+    const fees = gas.replacementFees(
+      { maxFeePerGas: optionalBigInt(old.maxFeePerGas), maxPriorityFeePerGas: optionalBigInt(old.maxPriorityFeePerGas), gasPrice: optionalBigInt(old.gasPrice) },
+      market
+    );
+    const base = kind === "cancel"
+      ? { to: ctx.owner, value: 0n, data: "0x", gasLimit: 21000n }
+      : { to: old.to, value: BigInt(old.value), data: old.data, gasLimit: BigInt(old.gasLimit) };
+    const tx: ethers.TransactionRequest = { ...base, nonce: item.nonce, ...fees.fields };
+    return { tx, item, estimate: this.feeEstimate("market", base.gasLimit, fees, base.value, balance) };
+  }
+
+  async estimateReplacement(hash: string, kind: "speedup" | "cancel") {
+    return (await this.prepareReplacement(hash, kind)).estimate;
+  }
+
+  async replaceTransaction(hash: string, kind: "speedup" | "cancel") {
+    const { tx, item, estimate } = await this.prepareReplacement(hash, kind);
+    if (estimate.balanceError) throw new Error(estimate.balanceError);
+    // Speeding up a cancellation is still a cancellation, and every replacement points at the
+    // original tx, so a chain of speed-ups resolves to one row in Activity
+    const finalKind = item.kind === "cancel" ? "cancel" : kind;
+    const display = finalKind === "cancel"
+      ? { to: this.requireSelected(), amount: "0", symbol: this.network().symbol }
+      : { to: item.to, amount: item.amount, symbol: item.symbol };
+    return this.sendAndRecord(tx, item.origin, display, {
+      kind: finalKind,
+      replaces: item.replaces ?? hash,
+      nft: finalKind === "speedup" ? item.nft : undefined,
+    });
+  }
+
+  async clearActivity() {
+    await assets.clearActivity(this.assetContext());
   }
 
   async getAddressInfo(address: string): Promise<AddressInfo> {
@@ -428,8 +570,8 @@ export class WalletController {
   private async sendAndRecord(
     tx: ethers.TransactionRequest,
     origin: string,
-    display?: { to: string; amount: string; symbol: string },
-    nft?: ActivityItem["nft"]
+    display?: { to: string | null; amount: string; symbol: string },
+    extra: Partial<ActivityItem> = {}
   ) {
     const wallet = this.signer();
     let response: ethers.TransactionResponse;
@@ -440,13 +582,15 @@ export class WalletController {
     }
     await assets.addActivity(this.assetContext(), {
       hash: response.hash,
-      to: display?.to ?? response.to,
+      to: display ? display.to : response.to,
       amount: display?.amount ?? ethers.formatEther(response.value),
       symbol: display?.symbol ?? this.network().symbol,
       origin,
       time: Date.now(),
       status: "pending",
-      nft,
+      nonce: response.nonce,
+      tx: storeTx(response),
+      ...extra,
     });
     return response.hash;
   }
@@ -459,8 +603,8 @@ export class WalletController {
     return this.approvals.get(id);
   }
 
-  resolveApproval(id: string, approved: boolean) {
-    this.approvals.resolve(id, approved);
+  resolveApproval(id: string, approved: boolean, speed?: GasSpeed) {
+    this.approvals.resolve(id, { approved, speed });
   }
 
   getConnectedOrigins() {
@@ -546,16 +690,18 @@ export class WalletController {
       case "eth_sendTransaction": {
         const tx = params[0] ?? {};
         this.assertAuthorized(origin, tx.from);
-        await this.requireApproval("eth_sendTransaction", origin, [tx]);
+        const { speed } = await this.requireApproval("eth_sendTransaction", origin, [tx]);
+        // The fee speed picked on the approval screen replaces whatever fees the site suggested
+        const fees = speed
+          ? gas.feesForSpeed(await this.marketFees(), speed).fields
+          : { gasPrice: tx.gasPrice, maxFeePerGas: tx.maxFeePerGas, maxPriorityFeePerGas: tx.maxPriorityFeePerGas };
         return this.sendAndRecord(
           {
             to: tx.to,
             value: tx.value,
             data: tx.data ?? tx.input,
             gasLimit: tx.gas ?? tx.gasLimit,
-            gasPrice: tx.gasPrice,
-            maxFeePerGas: tx.maxFeePerGas,
-            maxPriorityFeePerGas: tx.maxPriorityFeePerGas,
+            ...fees,
             nonce: tx.nonce !== undefined ? Number(tx.nonce) : undefined,
           },
           origin
@@ -593,9 +739,10 @@ export class WalletController {
   }
 
   private async requireApproval(type: ApprovalType, origin: string, params: any[] = []) {
-    const approved = await this.approvals.request(type, origin, params);
-    if (!approved) throw new RpcError(ERR.USER_REJECTED, "User rejected the request.");
+    const result = await this.approvals.request(type, origin, params);
+    if (!result.approved) throw new RpcError(ERR.USER_REJECTED, "User rejected the request.");
     if (!this.isUnlocked()) throw new RpcError(ERR.UNAUTHORIZED, "Wallet is locked");
+    return result;
   }
 
   private assertAuthorized(origin: string, address?: string) {
